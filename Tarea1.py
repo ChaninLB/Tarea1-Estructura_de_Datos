@@ -90,7 +90,7 @@ palabras1 = AnalizadorTexto()
 palabras1.agregar_palabra("Hola")
 palabras1.agregar_multiples("Hola", "Mundo", "Hola")
 
-#Ejercicio 3 esta mal
+#Ejercicio 3
 
 class CarroCompras:
     def __init__(self):
