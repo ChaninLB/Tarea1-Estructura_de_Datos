@@ -1,0 +1,305 @@
+#views_------_--------------------
+# =====================================================================
+# CONTROLADOR DE PAGOS
+# =====================================================================
+class PagoController(CrudBase):
+
+    def __init__(self, ventas, archivo="data/pagos.json"):
+        # El pago USA al controlador de ventas para buscar comprobantes y totales
+        self.ventas = ventas
+        self.gestor = GestorJSON(archivo)
+
+        self.lista = []
+        for datos in self.gestor.leer():
+            self.lista.append(Pago.desde_diccionario(datos))
+
+    def guardar(self):
+        datos = []
+        for pago in self.lista:
+            datos.append(pago.a_diccionario())
+        self.gestor.guardar(datos)
+
+    def total_a_pagar(self, venta):
+        # El total con IVA de la venta (el mismo número que muestra el comprobante)
+        return Producto.con_iva(venta.calcular_total())
+
+    def ventas_pagadas(self):
+        # CONJUNTO con los venta_id que ya tienen un pago registrado
+        return {p.venta_id for p in self.lista}
+
+    def esta_pagada(self, venta_id):
+        return venta_id in self.ventas_pagadas()
+
+    def pago_de_venta(self, venta_id):
+        for pago in self.lista:
+            if pago.venta_id == venta_id:
+                return pago
+        return None
+
+    def validar(self, datos):
+        try:
+            venta_id = int(datos.get("venta_id", 0))
+        except (TypeError, ValueError):
+            return "El id de la venta debe ser un número entero"
+
+        venta = self.ventas.obtener(venta_id)
+        if venta is None:
+            return f"No existe una venta con id {venta_id}"
+
+        if self.esta_pagada(venta_id):
+            return f"La venta #{venta_id} ya se encuentra pagada"
+
+        metodo = str(datos.get("metodo", "")).strip().lower()
+        if not Pago.es_metodo_valido(metodo):
+            return f"Método de pago inválido. Elija entre: {', '.join(Pago.METODOS)}"
+
+        total = self.total_a_pagar(venta)
+        recibido = datos.get("recibido", "")
+
+        if metodo == "efectivo":
+            try:
+                recibido_num = float(recibido)
+            except (TypeError, ValueError):
+                return "Debe ingresar un monto recibido válido"
+            
+            if recibido_num < total:
+                faltante = round(total - recibido_num, 2)
+                return f"Monto insuficiente: faltan ${faltante:.2f}"
+        
+        return None
+
+    def leer(self):
+        return self.lista
+
+    def obtener(self, id_pago):
+        for pago in self.lista:
+            if pago.id == id_pago:
+                return pago
+        return None
+
+    def buscar(self, texto):
+        texto = texto.strip().lower()
+        encontrados = []
+        if texto == "":
+            return encontrados
+
+        for pago in self.lista:
+            if texto in pago.fecha or texto in pago.metodo:
+                encontrados.append(pago)
+        return encontrados
+
+    def siguiente(self):
+        mayor = 0
+        for pago in self.lista:
+            if pago.id > mayor:
+                mayor = pago.id
+        return mayor + 1
+
+    def crear(self, datos):
+        error = self.validar(datos)
+        if error:
+            return False, error
+
+        venta_id = int(datos["venta_id"])
+        venta = self.ventas.obtener(venta_id)
+        metodo = str(datos["metodo"]).strip().lower()
+        total = self.total_a_pagar(venta)
+
+        recibido = total if metodo != "efectivo" else float(datos["recibido"])
+
+        pago = Pago(self.siguiente(), venta_id, total, metodo, recibido)
+        self.lista.append(pago)
+        self.guardar()
+        
+        cambio_txt = f" · cambio ${pago.calcular_cambio():.2f}" if metodo == "efectivo" else ""
+        return True, f"Pago #{pago.id} registrado por ${pago.monto:.2f}{cambio_txt}"
+
+    def actualizar(self, id_pago, datos):
+        return False, "Los pagos registrados no se pueden modificar"
+
+    def eliminar(self, id_pago):
+        return False, "Los pagos registrados no se pueden eliminar"
+
+    # --- propio de pagos ---
+    def recibo(self, id_pago):
+        pago = self.obtener(id_pago)
+        if pago is None:
+            return None
+
+        texto = f"RECIBO DE PAGO #{pago.id}   fecha: {pago.fecha}\n"
+        texto += f"Venta   : #{pago.venta_id}\n"
+        texto += f"Método  : {pago.metodo}\n"
+        texto += "-" * 42 + "\n"
+        texto += f"TOTAL   : ${pago.monto:.2f}\n"
+        texto += f"Recibido: ${pago.recibido:.2f}\n"
+        texto += f"Cambio  : ${pago.calcular_cambio():.2f}\n"
+        texto += "Estado  : PAGADA"
+        return texto
+
+    def ventas_pendientes(self):
+        pagadas = self.ventas_pagadas()
+        pendientes = []
+        for venta in self.ventas.leer():
+            if venta.id not in pagadas:
+                pendientes.append(venta)
+        return pendientes
+
+    def total_cobrado(self):
+        total = 0
+        for pago in self.lista:
+            total += pago.monto
+        return round(total, 2)
+
+#main -------------------------------------------------------------
+# Inicialización del controlador de pagos (añádelo abajo de ventas)
+pagos = PagoController(ventas)
+
+
+# =====================================================================
+# MENÚ DE PAGOS
+# =====================================================================
+
+def realizar_pago():
+    imprimir_titulo("REALIZAR PAGO")
+    
+    pendientes = pagos.ventas_pendientes()
+    if not pendientes:
+        imprimir_info("No hay ventas pendientes de pago.")
+        return pausa()
+
+    imprimir_info("Ventas pendientes:")
+    mostrar_lista(pendientes)
+    
+    id_venta = pedir_entero("\nId de la venta / factura: ")
+    if id_venta is None:
+        imprimir_error("Debe ingresar un número entero válido")
+        return pausa()
+
+    comprobante = ventas.comprobante(id_venta)
+    if comprobante is None:
+        imprimir_error("No existe esa venta")
+        return pausa()
+
+    print()
+    print(comprobante)
+    print()
+
+    if pagos.esta_pagada(id_venta):
+        imprimir_info("ℹ Estado: PAGADA")
+        return pausa()
+    else:
+        imprimir_info("ℹ Estado: PENDIENTE")
+
+    print("\nMétodos de pago:")
+    for i, metodo in enumerate(Pago.METODOS, 1):
+        print(f"  {i}. {metodo}")
+    
+    opcion_metodo = pedir_entero("Elija una opción de método: ")
+    if opcion_metodo is None or not (1 <= opcion_metodo <= len(Pago.METODOS)):
+        imprimir_error("Opción de método inválida")
+        return pausa()
+
+    metodo = Pago.METODOS[opcion_metodo - 1]
+    recibido = ""
+
+    if metodo == "efectivo":
+        recibido = input("Monto recibido: ").strip()
+
+    datos = {
+        "venta_id": id_venta,
+        "metodo": metodo,
+        "recibido": recibido
+    }
+
+    mostrar_resultado(*pagos.crear(datos))
+    pausa()
+
+
+def consultar_pago():
+    imprimir_titulo("CONSULTAR PAGO")
+    id_venta = pedir_entero("Id de la venta: ")
+    if id_venta is None:
+        imprimir_error("Id inválido")
+        return pausa()
+
+    comprobante = ventas.comprobante(id_venta)
+    if comprobante is None:
+        imprimir_error("No existe esa venta")
+        return pausa()
+
+    print()
+    print(comprobante)
+    print("-" * 42)
+
+    pago = pagos.pago_de_venta(id_venta)
+    if pago:
+        print(pagos.recibo(pago.id))
+    else:
+        imprimir_info("Estado: PENDIENTE de pago")
+    pausa()
+
+
+def listar_pagos():
+    imprimir_titulo("LISTA DE PAGOS")
+    mostrar_lista(pagos.leer(), "Todavía no hay pagos registrados.")
+    pausa()
+
+
+def ventas_pendientes_pantalla():
+    imprimir_titulo("VENTAS PENDIENTES DE PAGO")
+    mostrar_lista(pagos.ventas_pendientes(), "No hay ventas pendientes.")
+    pausa()
+
+
+
+#resumen--------------------------+-++-----+-
+MENU_PAGOS = {
+    "1": ("Realizar pago", realizar_pago),
+    "2": ("Consultar pago", consultar_pago),
+    "3": ("Ver todos los pagos", listar_pagos),
+    "4": ("Ventas pendientes", ventas_pendientes_pantalla),
+    "0": ("Volver", None),
+}
+
+def resumen():
+    imprimir_titulo("RESUMEN")
+    print(f"  Clientes  : {len(clientes.leer())}")
+    print(f"  Ciudades  : {', '.join(clientes.ciudades()) or '-'}")
+    print(f"  Productos : {len(productos.leer())}")
+    bajos = productos.con_stock_bajo()
+    print(f"  Stock bajo: {', '.join(p.nombre for p in bajos) or 'ninguno'}")
+    print(f"  Ventas    : {len(ventas.leer())}")
+    print(f"  Pendientes: {len(pagos.ventas_pendientes())}")
+    print(f"  Pagos     : {len(pagos.leer())}")
+    print(f"  Vendido   : ${ventas.total_vendido():.2f}")
+    print(f"  Cobrado   : ${pagos.total_cobrado():.2f}")
+    pausa()
+
+
+def main():
+    while True:
+        imprimir_titulo("SISTEMA DE VENTAS")
+        print("  1. Clientes")
+        print("  2. Productos")
+        print("  3. Ventas")
+        print("  4. Pagos")
+        print("  5. Resumen")
+        print("  0. Salir\n")
+
+        tecla = input("Opción: ").strip()
+        if tecla == "1":
+            ejecutar_menu("CLIENTES", MENU_CLIENTES)
+        elif tecla == "2":
+            ejecutar_menu("PRODUCTOS", MENU_PRODUCTOS)
+        elif tecla == "3":
+            ejecutar_menu("VENTAS", MENU_VENTAS)
+        elif tecla == "4":
+            ejecutar_menu("PAGOS", MENU_PAGOS)
+        elif tecla == "5":
+            resumen()
+        elif tecla == "0":
+            imprimir_info("¡Hasta luego! 👋")
+            break
+        else:
+            imprimir_error("Opción no válida")
+            pausa()
